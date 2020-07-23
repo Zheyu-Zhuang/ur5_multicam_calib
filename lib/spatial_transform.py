@@ -49,4 +49,8 @@ def SE3_avg(SE3_stack):
     out = np.eye(4)
     out[:, 3] = np.mean(SE3_stack[:, :, 3], axis=0)
     out[:3, :3] = SO3_avg(SE3_stack[:, :3, :3])
-    return out
+    n = SE3_stack.shape[0]
+    err_stat = []
+    for i in range(n):
+        err_stat.append(np.linalg.norm(out - SE3_stack[i, :, :]))
+    return out, np.mean(err_stat), np.std(err_stat)

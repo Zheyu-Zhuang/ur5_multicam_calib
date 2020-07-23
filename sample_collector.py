@@ -5,6 +5,7 @@ import glob
 import json
 import os
 
+import cv2.aruco as aruco
 # ROS Sys Pkg
 import message_filters
 import numpy as np
@@ -16,7 +17,6 @@ from lib.cfg import args, aruco_dict
 
 bridge = CvBridge()
 
-# Todo: add support to include measurements of table
 
 class SampleCollector:
     def __init__(self):
@@ -26,13 +26,23 @@ class SampleCollector:
         self.synced_msgs = message_filters.ApproximateTimeSynchronizer(
             [self.img_sub, self.joint_sub], 10, 0.1)
         self.synced_msgs.registerCallback(self.sync_callback)
-        self.dataset_dir = os.path.join('./dataset', args.dataset)
+        self.dataset_dir = os.path.join('./dataset', args.dataset, args.cam_id)
         self.cv2_img = None
         self.joint_config = None
 
     def sync_callback(self, image_msg, joint_msg):
         self.cv2_img = bridge.imgmsg_to_cv2(image_msg)
         self.joint_config = self.msg_to_joint_config(joint_msg)
+
+    def capture(self):
+        if args.mode == "camera":
+            self.get_sample()
+        elif args.mode == "table":
+            self.dataset_dir = os.path.join(self.dataset_dir, 'table')
+            self.get_sample()
+        else:
+            raise Exception(
+                'mode not supported, choose between "camera: and "table"')
 
     def get_sample(self):
         meta_dir = os.path.join(self.dataset_dir, 'meta')
@@ -82,4 +92,4 @@ if __name__ == "__main__":
     rospy.init_node("aruco_calib", anonymous=True)
     collector = SampleCollector()
     rospy.sleep(0.5)
-    collector.get_sample()
+    collector.capture()

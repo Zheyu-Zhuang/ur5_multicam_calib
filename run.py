@@ -12,7 +12,6 @@ from lib.ur5_kinematics import UR5Kinematics as UR5Kin
 
 ur5_kin = UR5Kin()
 
-# Todo: add support to measure the table height
 
 class MVC:
     def __init__(self):
@@ -37,51 +36,79 @@ class MVC:
             os.path.join('./dataset', args.dataset)).next()
         calib_file_path = os.path.join(root, 'system_calib.json')
         calib_dict = {}
-        if os.path.exists(calib_file_path):
-            os.remove(calib_file_path)
+        if os.path.exists(calib_file_path) and args.load_intrinsics:
+            calib_dict = json.load(open(calib_file_path, 'r'))
         for dir_temp in sub_dirs:
             print('\nCalibrating {}'.format(dir_temp))
             path_temp = os.path.join(root, dir_temp)
-            calib_dict[dir_temp] = self.calibrate(path_temp)
+            if args.load_intrinsics and dir_temp in calib_dict:
+                calib_dict[dir_temp] = self.calibrate(path_temp,
+                                                      calib_dict[dir_temp][
+                                                          "intrinsics"])
+            else:
+                calib_dict[dir_temp] = self.calibrate(path_temp)
         json.dump(calib_dict, open(calib_file_path, 'w'))
         print('System calibration file saved to:\n {}'.format(calib_file_path))
 
-    def calibrate(self, dataset_dir):
+    def calibrate(self, dataset_dir, intrinsics=None):
         data_dict = self.preprocess_images(dataset_dir)
         output_dict = {}
         if data_dict:
-            all_corners, all_ids = [], []
             all_image_names = data_dict.keys()
             n_images = len(all_image_names)
-            for image_name in all_image_names:
-                all_corners.append(data_dict[image_name]["corners"])
-                all_ids.append(data_dict[image_name]["ids"])
-                im_size = data_dict[image_name]["im_size"][:2]
-            print("Estimating camera intrinsics...")
-            intrinsics = self.get_camera_intrinsics(
-                all_corners, all_ids, im_size)
+            if intrinsics is None:
+                all_corners, all_ids = [], []
+                for image_name in all_image_names:
+                    all_corners.append(data_dict[image_name]["corners"])
+                    all_ids.append(data_dict[image_name]["ids"])
+                    im_size = data_dict[image_name]["im_size"][:2]
+                print("Estimating camera intrinsics...")
+                intrinsics = self.get_camera_intrinsics(
+                    all_corners, all_ids, im_size)
             output_dict['intrinsics'] = intrinsics
             # Estimating camera pose w.r.t Robot Base...
             B_X_C_stack = np.zeros((n_images, 4, 4))
             for i, image_name in enumerate(all_image_names):
                 corners_temp = data_dict[image_name]["corners"]
                 ids_temp = data_dict[image_name]["ids"]
-                B_X_C_stack[i] = self.get_ee_wrt_cam(
-                    corners_temp, ids_temp, intrinsics)
-            avg_cam_pose = SE3_avg(B_X_C_stack)
+                joint_config = data_dict[image_name]["joint_config"]
+                B_X_C_stack[i] = self.get_camera_pose_from_sample(
+                    corners_temp, ids_temp,
+                    np.array(joint_config).reshape(6, 1), intrinsics)
+            avg_cam_pose, err_mean, err_std = SE3_avg(B_X_C_stack)
             print("Pose of camera w.r.t Base:\n{}".format(
                 np.around(avg_cam_pose, decimals=4)))
+            print("L2 Norm Error Mean {}+/-{}\n".format(round(err_mean, 4),
+                                                     round(err_std, 4)))
             output_dict['pose'] = avg_cam_pose.tolist()
-            # if "table" is os.path.basename(dataset_dir):
-            #     table_height = 0
-            #     for i, image_name in enumerate(all_image_names):
-            #         corners_temp = data_dict[image_name]["corners"]
-            #         ids_temp = data_dict[image_name]["ids"]
-            #         joint_config = data_dict[image_name]["joint_config"]
-            #         table_height += self.get_table_height_from_sample(
-            #             corners_temp, ids_temp, B_X_C, joint_config)
-            #     output_dict['table_height'] = table_height/n_images
-            #     print("Estimating table height w.r.t Robot Base...")
+            _, sub_dirs, _ = os.walk(dataset_dir).next()
+            table_dir_idx = [i for i, x in enumerate(sub_dirs) if 'tab' in x]
+            for idx_temp in table_dir_idx:
+                print('Estimating table height...')
+                table_id = sub_dirs[idx_temp]
+                dataset_dir = os.path.join(dataset_dir, table_id)
+                data_dict = self.preprocess_images(dataset_dir)
+                all_image_names = data_dict.keys()
+                table_height = 0
+                err_stat = []
+                for i, image_name in enumerate(all_image_names):
+                    corners_temp = data_dict[image_name]["corners"]
+                    ids_temp = data_dict[image_name]["ids"]
+                    joint_config = data_dict[image_name]["joint_config"]
+                    height_temp, err = self.get_table_height_from_sample(
+                        corners_temp, ids_temp, avg_cam_pose,
+                        np.array(joint_config).reshape(6, 1), intrinsics)
+                    if height_temp is not None:
+                        table_height += height_temp
+                        err_stat.append(err)
+                avg_table_height = table_height / len(data_dict.keys())
+                output_dict["{}_height".format(table_id)] = avg_table_height
+                err_mean = round(np.mean(err_stat), 4)
+                err_std = round(np.std(err_stat), 4)
+                print("{} height w.r.t the base is {}".format(
+                    table_id, round(avg_table_height, 4)))
+                print("Error between vision and kin estimations: {}+/-{}".format(
+                    err_mean, err_std))
             return output_dict
 
     def preprocess_images(self, dataset_dir):
@@ -155,10 +182,9 @@ class MVC:
             B_X_T_kin = B_X_E.dot(self.E_X_T)
             height_from_kin = B_X_T_kin[2, 3]
             err = height_from_kin - height_from_vision
-            print("Error: {}".format(err))
-            return height_from_kin
+            return height_from_kin, err
         else:
-            return None
+            return None, None
 
     @staticmethod
     def get_corners(cv2_img):
