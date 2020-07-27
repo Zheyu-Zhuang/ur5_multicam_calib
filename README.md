@@ -3,40 +3,54 @@
 ![optional caption text](documents/robotic_vision_logo.jpg)
 
 ## Package Overview
-This software package uses OpenCV and Python to implement calibration of a multi-camera system with a UR5 robot arm. Software for data collection (image and joint angles) is included, implemented with ROS and Python. The package is currently implemented to calibrate a UR5 robot arm with either a PointGrey or ZED camera, however the calibration is general and other robotic or camera platforms can be used if the image and robotic end-effector pose are provided.
+This software package demonstrates a calibration strategy for
+multi-cameras with respect to the manipulator's base frame.
+This repository contains the main calibration script, required hardware CAD files,
+and a data collection example script.
+
+This software is designed for UR5 manipulator, however the overall
+calibration strategy is general and other robotic or camera platforms can be integrated
+if the robot forward kinematics is provided.
 
 ## Prequisites
-In order to run the software with a UR5 robot arm using either a Point Grey or ZED camera we used the following software packages:
+This repository is tested under python 2.7. 
+If the dataset is provided with the given  file structure,
+ the calibration can be executed without ROS. However, running the data 
+ collection example does require ROS. 
 
-* [OpenCV][cv]
+*The data collection script is tested on ur5 with firmware 13.xx*
 
 ChAruco calibration boards can be generated [here][board].
 
-## Run the program
-To run the program first launch the ros nodes. Eg:
-```{p}
-roslaunch ur_modern_driver ur5_ros_control.launch robot_ip:=XXX.XXX.XXX.X
-
-roslaunch zed_wrapper zed.launch
-
-roslaunch pointgrey_camera_driver camera.launch
-```
-To initialise the calibration run:
-```{p}
-python aruco_calib.py
-```
-To move the UR5 using freedrive while it is communicating with a ros node run:
-```{p}
-python freeDrive.py
-```
-
 ## File Structure
-The software package is split into data collection (`collect_data.py`), and calibration (`chAruco_calib.py`) stages. The data collection process is specific to a UR5 robot, and requires that the `freeDive.py` file be run concurrently. The calibration process is general, and requires only that the path to the image data be provided at the beginning of the `chAruco_calib.py` file.
+```
+./dataset
++-- dataset1
+|  +-- out.json
+|  +-- cam_0
+|  |  +-- images
+|  |  |  +-- 000.png
+|  |  |  +-- ...
+|  |  +-- meta
+|  |  |  +-- 000.json
+|  |  |  +-- ...
+|  |  +-- table*
+|  |  |  +-- images
+|  |  |  |  +-- ...
+|  |  |  +-- meta
+|  |  |  |  +-- ...
+|  +-- cam_1
+... 
+```
+The calibration script scans the sub-directories in a given dataset, each sub-directory
+contains the sample associated with one camera, including a `images` and a `meta` folder.
+The `*.json` file for each sample has the
+joint angle of the manipulator and corresponding image name. The `table` folder is optional, 
+it uses the calibration parameter associated with the directory it is in to estimate the 
+table surface height w.r.t the manipulator's base frame.
 
-Example input and output files are provided in the `Examples` folder.
-
-The CAD model for the calibration board is included as `XX`.
-
+## Run the program
+Type `python run.py -h` for detailed description of the optional arguments.
 
 ## Implementation
 The code is designed to calibrate the setup shown below.
