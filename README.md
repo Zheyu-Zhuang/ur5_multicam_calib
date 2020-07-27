@@ -3,8 +3,8 @@
 ![optional caption text](documents/robotic_vision_logo.jpg)
 
 ## Package Overview
-This software package demonstrates a calibration strategy for
-multi-cameras with respect to the manipulator's base frame.
+This software package demonstrates a strategy of calibrating
+multi-cameras' intrinsics and poses with respect to the manipulator's base frame.
 This repository contains the main calibration script, required hardware CAD files,
 and a data collection example script.
 
