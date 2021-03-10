@@ -83,19 +83,26 @@ class HandEyeCalibration:
             'Undefined calibration mode'
         n = X_H.shape[2]
         assert n > 4, 'No enough sample points'  
-        rand_idx = np.arange(n)
-        # random.shuffle(rand_idx)
-        k = int(n/2)
-        A, B = np.zeros((4, 4, k)), np.zeros((4, 4, k))
-        for ctr, i in enumerate(range(0, n-1, 2)):
-            id_0, id_1 = rand_idx[i], rand_idx[i+1]
+        rand_pairs = []
+        idx_list = range(n)
+        for idx, i in enumerate(idx_list[:-1]):
+            sample_list = idx_list[idx+1:]
+            for pair_id in sample_list:
+                rand_pairs.append([i, pair_id])
+        random.shuffle(rand_pairs)
+        n_samples = 300
+        assert len(rand_pairs) > n_samples, \
+            'Requested sample size is less than possible combinations'
+        A, B = np.zeros((4, 4, n_samples)), np.zeros((4, 4, n_samples))
+        for i in range(n_samples):
+            id_0, id_1 = rand_pairs[i][0], rand_pairs[i][1]
             X_H0, X_H1 = X_H[:, :, id_0], X_H[:, :, id_1]
             Ccv_X_M0, Ccv_X_M1 = Ccv_X_M[..., id_0], Ccv_X_M[..., id_1]
             if mode == 'eye_in_hand':
-                A[..., ctr] = np.linalg.inv(X_H1).dot(X_H0)
+                A[..., i] = np.linalg.inv(X_H1).dot(X_H0)
             elif mode == 'external':
-                A[..., ctr] = X_H1.dot(np.linalg.inv(X_H0))
-            B[..., ctr] = Ccv_X_M1.dot(np.linalg.inv(Ccv_X_M0))
+                A[..., i] = X_H1.dot(np.linalg.inv(X_H0))
+            B[..., i] = Ccv_X_M1.dot(np.linalg.inv(Ccv_X_M0))
         rot, trans = self.solve_ax_xb(A, B)
         return rot, trans
 
