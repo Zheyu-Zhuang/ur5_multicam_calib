@@ -4,11 +4,10 @@ import cv2.aruco as aruco
 
 parser = argparse.ArgumentParser()
 #
+parser.add_argument('--convention', type=str, default='robotics', 
+    help='specifies the reference frame convention of the camera calibration')
+parser.add_argument('--load_intrinsics', action="store_false")
 parser.add_argument('--dataset', type=str, help='directory for saving the data')
-parser.add_argument('--mode', type=str, default="camera")
-parser.add_argument('--cam_id', type=str)
-parser.add_argument('--table_id', type=str, default="table")
-parser.add_argument('--load_intrinsics', action="store_true")
 #
 parser.add_argument('--aruco_bit', type=int, default=4,
                     help='format of aruco dictionary')

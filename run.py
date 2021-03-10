@@ -1,123 +1,152 @@
-import cv2
-import glob
-import json
 import os
+import glob
+import random
+import json
 
-import cv2.aruco as aruco
+import cv2
 from tqdm import tqdm
 
 from lib.cfg import args, aruco_dict, charuco_board
 from lib.spatial_transform import *
 from lib.ur5_kinematics import UR5Kinematics as UR5Kin
+import lib.cmd_printer as cmd_printer
+from scipy.spatial.transform import Rotation as R
 
 ur5_kin = UR5Kin()
 
 
-class MVC:
+class HandEyeCalibration:
     def __init__(self):
-        self.M_X_E = np.array([[0, -1, 0, 0.23],
-                               [-1, 0, 0, 0.19],
-                               [0, 0, -1, -0.011],
-                               [0, 0, 0, 1]])
-        # offset between end-effector and table hen board is on table
-        self.board_height_offset = np.eye(4)
-        self.board_height_offset[2, 3] = -0.027
         # offset from the ee reference frame to the calibration board
-        self.E_X_T = np.matmul(np.linalg.inv(self.M_X_E),
-                               self.board_height_offset)
-        self.cv2robotics = np.array([[0, -1, 0, 0], [0, 0, -1, 0],
-                                     [1, 0, 0, 0], [0, 0, 0, 1]])
-
+        self.cv_X_r = np.array([[0, -1, 0, 0], 
+                                [0, 0, -1, 0],
+                                [1, 0, 0, 0],
+                                [0, 0, 0, 1]])
+        self.r_X_cv = np.linalg.inv(self.cv_X_r)
+    
     def start(self):
-        print("\n#################")
-        print("Start calibrating")
-        print("#################")
-        root, sub_dirs, _ = os.walk(
-            os.path.join('./dataset', args.dataset)).next()
-        calib_file_path = os.path.join(root, 'system_calib.json')
-        calib_dict = {}
-        if os.path.exists(calib_file_path) and args.load_intrinsics:
-            calib_dict = json.load(open(calib_file_path, 'r'))
-        for dir_temp in sub_dirs:
-            print('\nCalibrating {}'.format(dir_temp))
-            path_temp = os.path.join(root, dir_temp)
-            if args.load_intrinsics and dir_temp in calib_dict:
-                calib_dict[dir_temp] = self.calibrate(path_temp,
-                                                      calib_dict[dir_temp][
-                                                          "intrinsics"])
+        root_dir = os.path.join('./dataset', args.dataset)
+        calib_path = os.path.join(root_dir, 'calib.json')
+        assert os.path.exists(calib_path), "'calib.json' does not exist"
+        calib_dict = json.load(open(calib_path, 'r'))
+        meta = calib_dict['meta']
+        
+        for camera, mode in meta.items():
+            cmd_printer.divider(text='Calibrating <{}>'.format(camera))
+            path_temp = os.path.join(root_dir, camera)
+            imdb = self.preprocess_images(path_temp)
+            assert os.path.exists(path_temp), '{} does not exist'.format(path_temp)
+            if args.load_intrinsics: 
+                try:
+                    intrinsics = calib_dict[camera]['intrinsics']
+                except KeyError:
+                    intrinsics = self.intrinsics_calibration(imdb)
             else:
-                calib_dict[dir_temp] = self.calibrate(path_temp)
-        json.dump(calib_dict, open(calib_file_path, 'w'))
-        print('System calibration file saved to:\n {}'.format(calib_file_path))
+                intrinsics = self.intrinsics_calibration(imdb)
+            calib_dict[camera] = {}
+            calib_dict[camera]['intrinsics'] = intrinsics
+            calib_dict[camera]['extrinsics'] = self.calibrate(
+                imdb, intrinsics, mode)
+        # TODO: provide an option to save as euler angles
+        json.dump(calib_dict, open(calib_path, 'w'), indent=4)
+        print('\nSystem calibration file saved to:\n {}'.format(calib_path))
 
-    def calibrate(self, dataset_dir, intrinsics=None):
-        data_dict = self.preprocess_images(dataset_dir)
-        output_dict = {}
-        if data_dict:
-            all_image_names = data_dict.keys()
-            n_images = len(all_image_names)
-            if intrinsics is None:
-                all_corners, all_ids = [], []
-                for image_name in all_image_names:
-                    all_corners.append(data_dict[image_name]["corners"])
-                    all_ids.append(data_dict[image_name]["ids"])
-                    im_size = data_dict[image_name]["im_size"][:2]
-                print("Estimating camera intrinsics...")
-                intrinsics = self.get_camera_intrinsics(
-                    all_corners, all_ids, im_size)
-            output_dict['intrinsics'] = intrinsics
+    def calibrate(self, imdb, intrinsics=None, mode=None):
+        n_samples = len(imdb.keys())
+        if imdb:
             # Estimating camera pose w.r.t Robot Base...
-            B_X_C_stack = np.zeros((n_images, 4, 4))
-            for i, image_name in enumerate(all_image_names):
-                corners_temp = data_dict[image_name]["corners"]
-                ids_temp = data_dict[image_name]["ids"]
-                joint_config = data_dict[image_name]["joint_config"]
-                B_X_C_stack[i] = self.get_camera_pose_from_sample(
-                    corners_temp, ids_temp,
-                    np.array(joint_config).reshape(6, 1), intrinsics)
-            avg_cam_pose, err_mean, err_std = SE3_avg(B_X_C_stack)
-            print("Pose of camera w.r.t Base:\n{}".format(
-                np.around(avg_cam_pose, decimals=4)))
-            print("L2 Norm Error Mean {}+/-{}\n".format(round(err_mean, 4),
-                                                     round(err_std, 4)))
-            output_dict['pose'] = avg_cam_pose.tolist()
-            _, sub_dirs, _ = os.walk(dataset_dir).next()
-            table_dir_idx = [i for i, x in enumerate(sub_dirs) if 'tab' in x]
-            for idx_temp in table_dir_idx:
-                print('Estimating table height...')
-                table_id = sub_dirs[idx_temp]
-                dataset_dir = os.path.join(dataset_dir, table_id)
-                data_dict = self.preprocess_images(dataset_dir)
-                all_image_names = data_dict.keys()
-                table_height = 0
-                err_stat = []
-                for i, image_name in enumerate(all_image_names):
-                    corners_temp = data_dict[image_name]["corners"]
-                    ids_temp = data_dict[image_name]["ids"]
-                    joint_config = data_dict[image_name]["joint_config"]
-                    height_temp, err = self.get_table_height_from_sample(
-                        corners_temp, ids_temp, avg_cam_pose,
-                        np.array(joint_config).reshape(6, 1), intrinsics)
-                    if height_temp is not None:
-                        table_height += height_temp
-                        err_stat.append(err)
-                avg_table_height = table_height / len(data_dict.keys())
-                output_dict["{}_height".format(table_id)] = avg_table_height
-                err_mean = round(np.mean(err_stat), 4)
-                err_std = round(np.std(err_stat), 4)
-                print("{} height w.r.t the base is {}".format(
-                    table_id, round(avg_table_height, 4)))
-                print("Error between vision and kin estimations: {}+/-{}".format(
-                    err_mean, err_std))
-            return output_dict
+            # TODO: Estiamte Table Height
+            C_X_M = np.zeros((4, 4, n_samples))
+            X_H = np.zeros((4, 4, n_samples))
+            for i, img_id in enumerate(imdb.keys()):
+                C_X_M[..., i] = self.cmpt_C_X_M(
+                    imdb[img_id]["corners"],
+                    imdb[img_id]["ids"],
+                    intrinsics,
+                    convention=args.convention)
+                X_H[..., i]= ur5_kin.get_ee_pose(
+                    np.array(imdb[img_id]["joint_config"]).reshape(6, 1))
+            rot, trans = self.hand_eye_calibration(X_H, C_X_M, mode)
+            cmd_printer.divider(
+                'Camera Extrinsics in <{}> convention'.format(args.convention),
+                char='-')
+            rt = np.eye(4)
+            rt[:3,:3], rt[:3, 3] = rot, trans.flatten()
+            print(rt)
+            return {'R': rot.tolist(), 't':trans.tolist()}
+        else:
+            print('IMDB is empty')
+            return None
+
+    def hand_eye_calibration(self, X_H, Ccv_X_M, mode):
+        assert mode in ('eye_in_hand', 'external'), \
+            'Undefined calibration mode'
+        n = X_H.shape[2]
+        assert n > 4, 'No enough sample points'  
+        rand_idx = np.arange(n)
+        # random.shuffle(rand_idx)
+        k = int(n/2)
+        A, B = np.zeros((4, 4, k)), np.zeros((4, 4, k))
+        for ctr, i in enumerate(range(0, n-1, 2)):
+            id_0, id_1 = rand_idx[i], rand_idx[i+1]
+            X_H0, X_H1 = X_H[:, :, id_0], X_H[:, :, id_1]
+            Ccv_X_M0, Ccv_X_M1 = Ccv_X_M[..., id_0], Ccv_X_M[..., id_1]
+            if mode == 'eye_in_hand':
+                A[..., ctr] = np.linalg.inv(X_H1).dot(X_H0)
+            elif mode == 'external':
+                A[..., ctr] = X_H1.dot(np.linalg.inv(X_H0))
+            B[..., ctr] = Ccv_X_M1.dot(np.linalg.inv(Ccv_X_M0))
+        rot, trans = self.solve_ax_xb(A, B)
+        return rot, trans
+
+    @staticmethod
+    def calibrate_plane(X_Ccv, Ccv_X_M):
+        # do rotation averaging:
+        n = X_Ccv.shape[2]
+        assert n > 2, 'Not enough samples'
+        X_M = np.zeros((n, 4, 4))
+        for i in range(n):
+            X_M[i, :, :] = X_Ccv[:, :, i].dot(Ccv_X_M[:, :, i])
+        X_M_avg, err_mean, err_std = SE3_avg(X_M)
+        print('rotation avg error: {}+\-{}'.format(err_mean, err_std))
+        return X_M_avg
+    
+    @staticmethod
+    def solve_ax_xb(A, B):
+        _, _, n = A.shape
+        A_ = np.zeros((9*n, 9))
+        b = np.zeros((9*n, 1))
+        for i in range(n):
+            Ra = A[:3, :3, i]
+            Rb = B[:3, :3, i]
+            A_[9*i: 9*(i+1), :] = np.kron(Ra, np.eye(3)) +\
+                np.kron(-np.eye(3), Rb.T)
+        _, _, vh = np.linalg.svd(A_)
+        v = vh.T
+        x = v[:, -1]
+        R = x.reshape(3, 3)
+        det_R = np.linalg.det(R)
+        R = np.sign(det_R)/abs(det_R)**(1/3.0) * R
+        u, s, vh = np.linalg.svd(R)
+        R = u.dot(vh)
+        if np.linalg.det(R) < 0:
+            R = u .dot(np.diag([1, 1, -1])).dot(vh)
+        C = np.zeros((3*n, 3))
+        d = np.zeros((3*n, 1))
+        I = np.eye(3)
+        for i in range(n):
+            C[3*i: 3*(i+1), :] = I - A[:3, :3, i]
+            d[3*i: 3*(i+1), 0] = A[:3, 3, i] -  R.dot(B[:3, 3, i])
+        t = np.linalg.lstsq(C, d, rcond=None)[0]
+        return R, t
 
     def preprocess_images(self, dataset_dir):
         image_dir = os.path.join(dataset_dir, 'images')
         meta_dir = os.path.join(dataset_dir, 'meta')
         all_meta_paths = glob.glob(os.path.join(meta_dir, '*.json'))
         data_dict = {}
-        print("Extracting corners from all images")
-        for meta_path in tqdm(all_meta_paths):
+        print('Extracting All Image Corners:')
+        for meta_path in tqdm(all_meta_paths, ncols=59):
             meta = json.load(open(meta_path))
             image_name = meta['image_name']
             cv2_img = cv2.imread(os.path.join(image_dir, image_name))
@@ -132,9 +161,16 @@ class MVC:
         return data_dict
 
     @staticmethod
-    def get_camera_intrinsics(all_corners, all_ids, im_size):
+    def intrinsics_calibration(data_dict):
+        print("Estimating camera intrinsics...")
+        all_image_names = data_dict.keys()
+        all_corners, all_ids = [], []
+        for image_name in all_image_names:
+            all_corners.append(data_dict[image_name]["corners"])
+            all_ids.append(data_dict[image_name]["ids"])
+            im_size = data_dict[image_name]["im_size"][:2]
         try:
-            _, cam_mat, dist_coeffs, _, _ = aruco.calibrateCameraCharuco(
+            _, cam_mat, dist_coeffs, _, _ = cv2.aruco.calibrateCameraCharuco(
                 charucoCorners=all_corners, charucoIds=all_ids,
                 board=charuco_board, imageSize=im_size,
                 cameraMatrix=None, distCoeffs=None)
@@ -145,54 +181,31 @@ class MVC:
         except:
             print("Intrinsic calibration failed. Recalibrating...")
 
-    def get_ee_wrt_cam(self, corners, ids, intrinsics, convention='robotic'):
-        retval, rvecs, tvecs = aruco.estimatePoseCharucoBoard(
+    def cmpt_C_X_M(self, corners, ids, intrinsics, convention='robotic'):
+        retval, rvecs, tvecs = cv2.aruco.estimatePoseCharucoBoard(
             corners, ids, charuco_board, np.array(intrinsics["K"]),
             np.array(intrinsics["distortion"]))
         if retval:
             Ccv_X_M = np.eye(4)
             Ccv_X_M[:3, 3] = tvecs[:3].reshape(3)
             Ccv_X_M[0:3, 0:3] = cv2.Rodrigues(rvecs[:])[0]
-            Ccv_X_E = Ccv_X_M.dot(self.M_X_E)
-            E_X_Ccv = np.linalg.inv(Ccv_X_E)
-            if convention == 'robotic':
-                return E_X_Ccv.dot(self.cv2robotics)
-            else:
-                return E_X_Ccv
+            if convention == 'robotics':
+                C_X_M = self.r_X_cv.dot(Ccv_X_M)
+            elif convention == 'cv':
+                C_X_M = Ccv_X_M
+            # print(C_X_M)
+            return C_X_M
         else:
             print('Board Pose not detected')
             return None
 
-    def get_camera_pose_from_sample(self, corners, ids, joint_config,
-                                    intrinsics):
-        E_X_C = self.get_ee_wrt_cam(corners, ids, intrinsics)
-        if E_X_C is not None:
-            B_X_E = ur5_kin.get_ee_pose(joint_config)
-            return B_X_E.dot(E_X_C)
-        else:
-            return None
-
-    def get_table_height_from_sample(self, corners, ids, B_X_C, joint_config,
-                                     intrinsics):
-        E_X_C = self.get_ee_wrt_cam(corners, ids, intrinsics)
-        if E_X_C is not None:
-            B_X_T_vision = B_X_C.dot(np.linalg.inv(E_X_C)).dot(self.E_X_T)
-            height_from_vision = B_X_T_vision[2, 3]
-            B_X_E = ur5_kin.get_ee_pose(joint_config)
-            B_X_T_kin = B_X_E.dot(self.E_X_T)
-            height_from_kin = B_X_T_kin[2, 3]
-            err = height_from_kin - height_from_vision
-            return height_from_kin, err
-        else:
-            return None, None
-
     @staticmethod
     def get_corners(cv2_img):
         gray_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = aruco.detectMarkers(image=gray_img,
+        corners, ids, _ = cv2.aruco.detectMarkers(image=gray_img,
                                               dictionary=aruco_dict)
         if ids is not None and len(ids) > 5:
-            _, charuco_corners, charuco_ids = aruco.interpolateCornersCharuco(
+            _, charuco_corners, charuco_ids = cv2.aruco.interpolateCornersCharuco(
                 corners, ids, gray_img, charuco_board)
             return charuco_corners, charuco_ids
         else:
@@ -201,5 +214,9 @@ class MVC:
 
 
 if __name__ == "__main__":
-    calib = MVC()
+    cmd_printer.divider(text="Arguments", line_max=60)
+    for arg in vars(args):
+        print('{}: {}'.format(arg, getattr(args, arg)))
+    
+    calib = HandEyeCalibration()
     calib.start()

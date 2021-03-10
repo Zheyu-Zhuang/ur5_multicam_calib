@@ -31,14 +31,14 @@ def so3_exp(_so3):
 
 def SO3_avg(SO3_stack, err_th=0.01):
     # implement Karcher mean / geodesic L2-mean on SO(3)
-    n = SO3_stack.shape[0]
-    out = SO3_stack[0, :, :]
+    n = SO3_stack.shape[2]
+    out = SO3_stack[:, :, 0]
     err = 100
     while err > err_th:
         _so3_err_sum = np.zeros([3, 3])
         for i in range(n):
             _so3_err_sum += SO3_log(
-                np.transpose(out).dot(SO3_stack[i, :, :]))
+                np.transpose(out).dot(SO3_stack[:, :, i]))
         out = out.dot(so3_exp(_so3_err_sum / n))
         err = np.linalg.norm(_so3_err_sum)
         # print(err)
@@ -47,10 +47,10 @@ def SO3_avg(SO3_stack, err_th=0.01):
 
 def SE3_avg(SE3_stack):
     out = np.eye(4)
-    out[:, 3] = np.mean(SE3_stack[:, :, 3], axis=0)
-    out[:3, :3] = SO3_avg(SE3_stack[:, :3, :3])
+    out[:, 3] = np.mean(SE3_stack[:, 3, :], axis=2)
+    out[:3, :3] = SO3_avg(SE3_stack[:3, :3, :])
     n = SE3_stack.shape[0]
     err_stat = []
     for i in range(n):
-        err_stat.append(np.linalg.norm(out - SE3_stack[i, :, :]))
+        err_stat.append(np.linalg.norm(out - SE3_stack[:, :, i]))
     return out, np.mean(err_stat), np.std(err_stat)
