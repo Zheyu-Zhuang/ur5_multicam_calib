@@ -122,7 +122,7 @@ class HandEyeCalibration:
     def solve_ax_xb(A, B):
         _, _, n = A.shape
         A_ = np.zeros((9*n, 9))
-        b = np.zeros((9*n, 1))
+        # b = np.zeros((9*n, 1))
         for i in range(n):
             Ra = A[:3, :3, i]
             Rb = B[:3, :3, i]
@@ -134,7 +134,7 @@ class HandEyeCalibration:
         R = x.reshape(3, 3)
         det_R = np.linalg.det(R)
         R = np.sign(det_R)/abs(det_R)**(1/3.0) * R
-        u, s, vh = np.linalg.svd(R)
+        u, _, vh = np.linalg.svd(R)
         R = u.dot(vh)
         if np.linalg.det(R) < 0:
             R = u .dot(np.diag([1, 1, -1])).dot(vh)
